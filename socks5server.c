@@ -163,16 +163,42 @@ static void close_conn(int fd) {
     if (fd <= 0) return;
     if (!pconn_is_exist(fd)) return;
     int cp_fd = pconn_get_couple_id(fd);
-    pconn_chg_status(fd, PCONN_ST_OFF);
+    pconn_set_status(fd, PCONN_ST_OFF);
     ssnet_tcp_close(g_socks.net, fd);
     pconn_free(fd);
     _LOG("close_conn fd:%d", fd);
     if (cp_fd > 0) {
+        pconn_set_status(cp_fd, PCONN_ST_OFF);
         ssnet_tcp_close(g_socks.net, cp_fd);
         pconn_free(cp_fd);
         _LOG("close_conn cp_fd:%d", cp_fd);
     }
     _LOG("close_conn fd:%d cp_fd:%d ok.", fd, cp_fd);
+}
+
+static int flush_tcp_send(int fd, stream_buf_t* snd_buf, const char* buf, int len) {
+    _LOG("flush_tcp_send fd:%d status:%d type:%d", fd, pconn_get_status(fd), pconn_get_type(fd));
+    assert(pconn_get_status(fd) == PCONN_ST_ON);
+    assert(snd_buf);
+    assert(buf);
+    assert(len > 0);
+    int rt = ssnet_tcp_send(g_socks.net, fd, buf, len);
+    if (rt == 0 || rt == -2) {
+        _LOG("flush_tcp_send error fd:%d rt:%d len:%d", fd, rt, len);
+        return _ERR;
+    } else if (rt == -1) {
+        /* pending */
+        pconn_set_can_write(fd, 0);
+        _LOG("flush_tcp_send pending send fd:%d len:%d", fd, len);
+        sb_write(snd_buf, buf, len);
+    } else if (rt < len) {
+        /* remain */
+        _LOG("flush_tcp_send remain send fd:%d len:%d", fd, rt);
+        assert(rt > 0);
+        sb_write(snd_buf, buf + rt, len - rt);
+    }
+    _LOG("flush_tcp_send ok. fd:%d", fd);
+    return _OK;
 }
 
 static int connect_to(const char* ip, unsigned short port, int cp_fd) {
@@ -188,10 +214,10 @@ static int connect_to(const char* ip, unsigned short port, int cp_fd) {
     int rt;
     rt = pconn_init(fd, PCONN_TYPE_BK, cp_fd);
     assert(rt == 0);
-    rt = pconn_chg_status(cp_fd, PCONN_ST_ON);
-    assert(rt != PCONN_ST_NONE);
-    rt = pconn_chg_status(fd, PCONN_ST_READY);
-    assert(rt != PCONN_ST_NONE);
+    rt = pconn_set_status(cp_fd, PCONN_ST_ON);
+    assert(rt == _OK);
+    rt = pconn_set_status(fd, PCONN_ST_READY);
+    assert(rt == _OK);
     rt = pconn_set_couple_id(fd, cp_fd);
     assert(rt == 0);
     rt = pconn_set_couple_id(cp_fd, fd);
@@ -201,9 +227,33 @@ static int connect_to(const char* ip, unsigned short port, int cp_fd) {
 
 static int send_to(int fd, const char* buf, int len) {
     if (fd <= 0 || !buf || len <= 0) return _ERR;
-    if (pconn_get_status(fd) <= PCONN_ST_OFF) return _ERR;
-    int rt = pconn_send(fd, buf, len);
-    _LOG("send_to buf fd:%d rt:%d", fd, rt);
+    pconn_st_t st = pconn_get_status(fd);
+    if (st <= PCONN_ST_OFF) return _ERR;
+    _LOG("send_to buf fd:%d len:%d", fd, len);
+    stream_buf_t* snd_buf = pconn_get_snd_buf(fd);
+    assert(snd_buf);
+    int rt;
+    if (pconn_get_status(fd) == PCONN_ST_READY) {
+        rt = sb_write(snd_buf, buf, len);
+        assert(rt == _OK);
+        return rt;
+    }
+
+    if (sb_get_size(snd_buf) == 0 && pconn_can_write(fd)) return flush_tcp_send(fd, snd_buf, buf, len);
+    rt = sb_write(snd_buf, buf, len);
+    assert(rt == _OK);
+    if (pconn_can_write(fd)) return flush_tcp_send(fd, snd_buf, buf, len);
+    return rt;
+}
+
+static int send_to_cp(int fd, const char* buf, int len) {
+    int cp_fd = pconn_get_couple_id(fd);
+    if (cp_fd <= 0 || pconn_get_status(fd) <= PCONN_ST_OFF || pconn_get_status(cp_fd) <= PCONN_ST_OFF) {
+        close_conn(fd);
+        return _ERR;
+    }
+    int rt = send_to(cp_fd, buf, len);
+    if (rt != _OK) close_conn(fd);
     return rt;
 }
 
@@ -214,8 +264,7 @@ static void domain_cb(domain_req_t* req) {
         _LOG("req is NULL in domain_cb");
         return;
     }
-    _LOG("dns id:%d resp:%d name:%s ip:%s", get_domain_req_id(req), get_domain_req_resp(req), get_domain_req_name(req),
-         get_domain_req_ip(req));
+    _LOG("dns id:%d resp:%d name:%s ip:%s", get_domain_req_id(req), get_domain_req_resp(req), get_domain_req_name(req), get_domain_req_ip(req));
     int src_fd = get_domain_req_id(req);
     if (src_fd > 0 && get_domain_req_resp(req) == 0) {
         int src_status = pconn_get_status(src_fd);
@@ -240,14 +289,12 @@ static void domain_cb(domain_req_t* req) {
         int cp_fd = connect_to(ip, port, src_fd);
         if (cp_fd <= 0) {
             close_conn(src_fd);
-            close_conn(cp_fd); /* TODO: */
             /* free_domain_req(req); */
             return;
         }
         int rt = send_to(src_fd, ack, 7 + d_len);
         if (rt == -1) {
             close_conn(src_fd);
-            close_conn(cp_fd); /* TODO: */
             /* free_domain_req(req); */
             return;
         }
@@ -394,28 +441,27 @@ static void ss5_req(int fd, const char* buf, int len) {
 }
 
 static int on_backend_recv(int fd, const char* buf, int len) {
-    /* TODO: */
-    return _OK;
+    return send_to_cp(fd, buf, len);
 }
 
 static int on_front_recv(int fd, const char* buf, int len) {
     int phase = pconn_get_ex(fd);
     assert(phase != 0);
+    int rt = _OK;
     if (phase == SS5_PHASE_AUTH) {
         ss5_auth(fd, buf, len);
-        return _ERR;
     } else if (phase == SS5_PHASE_REQ) {
         ss5_req(fd, buf, len);
-        return _ERR;
     } else if (phase == SS5_PHASE_AUTH_NP) {
         ss5_auth_np(fd, buf, len);
-        return _ERR;
     } else if (phase == SS5_PHASE_DATA) {
-        return _OK;
+        rt = send_to_cp(fd, buf, len);
+    } else {
+        _LOG_E("socks5 phase error %d", phase);
+        close_conn(fd);
+        return _ERR;
     }
-    _LOG_E("socks5 phase error %d", phase);
-    close_conn(fd);
-    return _ERR;
+    return rt;
 }
 
 static int on_recv(ssnet_t* net, int fd, const char* buf, int len, struct sockaddr* addr) {
@@ -438,16 +484,78 @@ static int on_close(ssnet_t* net, int fd) {
 }
 
 static int on_accept(ssnet_t* net, int fd) {
+    int rt = pconn_init(fd, PCONN_TYPE_FR, 0);
+    assert(rt == _OK);
+    rt = pconn_set_status(fd, PCONN_ST_ON);
+    assert(rt == _OK);
+    rt = pconn_set_can_write(fd, 1);
+    assert(rt == 0);
     pconn_set_ex(fd, SS5_PHASE_AUTH);
     pconn_set_is_secret(fd, 0);
-    pconn_set_can_write(fd, 1);
+    return _OK;
+}
+
+static int on_connected(ssnet_t* net, int fd) {
+    _LOG("on_connected fd:%d", fd);
+    if (!pconn_is_exist(fd)) {
+        _LOG("on_connected fd:%d does not exist, close", fd);
+        ssnet_tcp_close(net, fd);
+        return _ERR;
+    }
+    if (pconn_get_status(fd) == PCONN_ST_OFF) {
+        _LOG("on_connected fd:%d is off, close", fd);
+        close_conn(fd);
+        return _ERR;
+    }
+    int cp_fd = pconn_get_couple_id(fd);
+    if (cp_fd == 0) {
+        close_conn(fd);
+        return _OK;
+    }
+    if (!pconn_is_same_fr(fd)) {
+        close_conn(fd);
+        return _OK;
+    }
+    assert(pconn_get_type(cp_fd) == PCONN_TYPE_FR);
+    int rt = pconn_set_status(fd, PCONN_ST_ON);
+    assert(rt == _OK);
+    _LOG("on_connected ok. fd:%d", fd);
     return _OK;
 }
 
 static int on_writable(ssnet_t* net, int fd) {
     _LOG("on_writable fd:%d", fd);
-    /* TODO: */
-    return _OK;
+    assert(pconn_get_type(fd) != PCONN_TYPE_NONE);
+    int rt = _OK;
+    if (pconn_get_status(fd) == PCONN_ST_READY && pconn_get_type(fd) == PCONN_TYPE_BK) {
+        rt = on_connected(net, fd);
+    }
+
+    if (rt == _OK) {
+        rt = pconn_set_can_write(fd, 1);
+        assert(rt == 0);
+        if (pconn_get_status(fd) == PCONN_ST_ON) {
+            stream_buf_t* snd_buf = pconn_get_snd_buf(fd);
+            assert(snd_buf);
+            int len = sb_get_size(snd_buf);
+            if (len > 0) {
+                char* _ALLOC(buf, char*, len);
+                sb_read_all(snd_buf, buf, len);
+                rt = flush_tcp_send(fd, snd_buf, buf, len);
+                free(buf);
+                if (rt != _OK) {
+                    close_conn(fd);
+                }
+            }
+        }
+    }
+    return rt;
+}
+
+static void free_close_cb(int id, void* u) {
+    ssnet_t* net = (ssnet_t*)u;
+    assert(net);
+    ssnet_tcp_close(net, id);
 }
 
 /* ---------------------------- */
@@ -461,8 +569,7 @@ int main(int argc, char const* argv[]) {
     }
 
     sslog_init(g_socks.log_file, g_socks.log_level);
-    printf("listen ip: %s \nlisten port: %u \nlog level: %d \nlog file: %s\n", g_socks.listen_ip, g_socks.listen_port,
-           g_socks.log_level, g_socks.log_file);
+    printf("listen ip: %s \nlisten port: %u \nlog level: %d \nlog file: %s\n", g_socks.listen_ip, g_socks.listen_port, g_socks.log_level, g_socks.log_file);
     if (g_socks.log_file) free(g_socks.log_file);
 
     g_socks.loop = ssev_init();
@@ -471,6 +578,11 @@ int main(int argc, char const* argv[]) {
         return 1;
     }
     /* ssev_set_ev_timeout(g_socks.loop, g_socks.timeout); */
+
+    if (init_domain_resolver(g_socks.loop) != 0) {
+        _LOG_E("init domain resolver error.");
+        return 1;
+    }
 
     g_socks.net = ssnet_init(g_socks.loop, 0);
     if (!g_socks.net) {
@@ -495,7 +607,9 @@ int main(int argc, char const* argv[]) {
     sigaction(SIGPIPE, &action, NULL);
     sigaction(SIGINT, &action, NULL);
     ssev_run(g_socks.loop);
+    pconn_free_all(g_socks.net, free_close_cb);
     ssnet_free(g_socks.net);
+    free_domain_resolver(g_socks.loop);
     ssev_free(g_socks.loop);
 
     _LOG("Bye");
