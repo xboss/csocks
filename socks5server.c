@@ -125,6 +125,7 @@ static int parse_param(int argc, char const* argv[]) {
         return _ERR;
     }
     g_socks.listen_port = (unsigned short)port;
+    g_socks.log_level = SSLOG_LEVEL_FATAL;
     if (argc >= 4) {
         len = 10;
         char* v = (char*)argv[3];
@@ -141,7 +142,6 @@ static int parse_param(int argc, char const* argv[]) {
         } else if (strncasecmp(v, "FATAL", len) == 0) {
             g_socks.log_level = SSLOG_LEVEL_FATAL;
         } else {
-            g_socks.log_level = SSLOG_LEVEL_FATAL;
             fprintf(stderr, "Invalid log level:%s, now default: FATAL\n", v);
         }
     }
