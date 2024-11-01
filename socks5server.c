@@ -249,10 +249,16 @@ static int send_to(int fd, const char* buf, int len) {
         return rt;
     }
 
-    if (sb_get_size(snd_buf) == 0 && pconn_can_write(fd)) return flush_tcp_send(fd, snd_buf, buf, len);
+    int wlen = sb_get_size(snd_buf);
+    if (wlen == 0 && pconn_can_write(fd)) return flush_tcp_send(fd, snd_buf, buf, len);
     rt = sb_write(snd_buf, buf, len);
     assert(rt == _OK);
-    if (pconn_can_write(fd)) return flush_tcp_send(fd, snd_buf, buf, len);
+    if (pconn_can_write(fd)) {
+        char* _ALLOC(wbuf, char*, wlen);
+        sb_read_all(snd_buf, wbuf, wlen);
+        rt = flush_tcp_send(fd, snd_buf, wbuf, wlen);
+        free(wbuf);
+    }
     return rt;
 }
 
@@ -527,13 +533,9 @@ static int on_connected(ssnet_t* net, int fd) {
         return _ERR;
     }
     int cp_fd = pconn_get_couple_id(fd);
-    if (cp_fd == 0) {
+    if (cp_fd == 0 || !pconn_is_couple(fd)) {
         close_conn(fd);
-        return _OK;
-    }
-    if (!pconn_is_couple(fd)) {
-        close_conn(fd);
-        return _OK;
+        return _ERR;
     }
     assert(pconn_get_type(cp_fd) == PCONN_TYPE_FR);
     int rt = pconn_set_status(fd, PCONN_ST_ON);
