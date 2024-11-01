@@ -41,6 +41,7 @@ struct domain_req_s {
     unsigned short port;
     struct addrinfo *addrinfo;
     domain_cb_t cb;
+    uint64_t time;
     void *userdata;
     struct domain_req_s *next;
 };
@@ -250,7 +251,7 @@ int resolve_domain(domain_req_t *req) {
 }
 
 domain_req_t *init_domain_req(int id, const char *name, int name_len, domain_cb_t cb, unsigned short port,
-                              void *userdata) {
+                              uint64_t time, void *userdata) {
     if (id < 0 || !name || !cb) return NULL;
     domain_req_t *req = _ALLOC(domain_req_t *, sizeof(domain_req_t));
     _CHECK_ALLOC(req, return NULL;)
@@ -267,6 +268,7 @@ domain_req_t *init_domain_req(int id, const char *name, int name_len, domain_cb_
     req->port = port;
     req->userdata = userdata;
     req->next = NULL;
+    req->time = time;
     _LOG("init_domain_req: tid:%lu name:%p req:%p", pthread_self(), req->name, req);
     return req;
 }
@@ -315,4 +317,9 @@ void *get_domain_req_userdata(domain_req_t *req) {
 unsigned short get_domain_req_port(domain_req_t *req) {
     if (!req) return _ERR;
     return req->port;
+}
+
+uint64_t get_domain_req_time(domain_req_t *req) {
+    if (!req) return 0UL;
+    return req->time;
 }

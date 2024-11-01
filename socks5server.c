@@ -207,12 +207,12 @@ static int connect_to(const char* ip, unsigned short port, int cp_fd) {
         _LOG("connect_to cp_fd:%d does not exist", cp_fd);
         return _ERR;
     }
-    if (pconn_get_type(cp_fd) != PCONN_TYPE_FR) {
-        _LOG("connect_to cp_fd:%d does not front", cp_fd);
-        return _ERR;
-    }
     if (pconn_get_couple_id(cp_fd) != 0) {
         _LOG("connect_to pconn_get_couple_id cp_fd:%d, cp_cp_id:%d", cp_fd, pconn_get_couple_id(cp_fd));
+        return _ERR;
+    }
+    if (pconn_get_type(cp_fd) != PCONN_TYPE_FR) {
+        _LOG_E("connect_to cp_fd:%d does not front", cp_fd);
         return _ERR;
     }
     int fd = ssnet_tcp_connect(g_socks.net, ip, port);
@@ -296,6 +296,14 @@ static void domain_cb(domain_req_t* req) {
         unsigned short nport = htons(port);
         /* ack[5 + d_len] = htons(port); */
         memcpy(ack + 5 + d_len, &nport, 2);
+
+        uint64_t ctime = pconn_get_ctime(src_fd);
+        if (ctime != get_domain_req_time(req)) {
+            /* check if it is the fd that initiated the request.  */
+            close_conn(src_fd);
+            /* free_domain_req(req); */
+            return;
+        }
 
         int cp_fd = connect_to(ip, port, src_fd);
         if (cp_fd <= 0) {
@@ -416,7 +424,9 @@ static void ss5_req(int fd, const char* buf, int len) {
         int d_len = (int)(buf[4] & 0xff);
         assert(d_len <= SS5_DOMAIN_NAME_MAX_SZ);
         port = ntohs(*(uint16_t*)(buf + 4 + d_len + 1));
-        domain_req_t* req = init_domain_req(fd, buf + 5, d_len, domain_cb, port, pipe);
+        uint64_t ctime = pconn_get_ctime(fd);
+        assert(ctime > 0);
+        domain_req_t* req = init_domain_req(fd, buf + 5, d_len, domain_cb, port, ctime, pipe);
         if (!req) {
             close_conn(fd);
             return;
