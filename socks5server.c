@@ -203,8 +203,18 @@ static int flush_tcp_send(int fd, stream_buf_t* snd_buf, const char* buf, int le
 
 static int connect_to(const char* ip, unsigned short port, int cp_fd) {
     if (port <= 0 || !ip || cp_fd <= 0) return _ERR;
-    assert(pconn_get_type(cp_fd) == PCONN_TYPE_FR);
-    assert(pconn_get_couple_id(cp_fd) == 0);
+    if (!pconn_is_exist(cp_fd)) {
+        _LOG("connect_to cp_fd:%d does not exist", cp_fd);
+        return _ERR;
+    }
+    if (pconn_get_type(cp_fd) != PCONN_TYPE_FR) {
+        _LOG("connect_to cp_fd:%d does not front", cp_fd);
+        return _ERR;
+    }
+    if (pconn_get_couple_id(cp_fd) != 0) {
+        _LOG("connect_to pconn_get_couple_id cp_fd:%d, cp_cp_id:%d", cp_fd, pconn_get_couple_id(cp_fd));
+        return _ERR;
+    }
     int fd = ssnet_tcp_connect(g_socks.net, ip, port);
     _LOG("connect_to fd:%d cp_fd:%d", fd, cp_fd);
     if (fd <= 0) {
@@ -264,7 +274,8 @@ static void domain_cb(domain_req_t* req) {
         _LOG("req is NULL in domain_cb");
         return;
     }
-    _LOG("dns id:%d resp:%d name:%s ip:%s", get_domain_req_id(req), get_domain_req_resp(req), get_domain_req_name(req), get_domain_req_ip(req));
+    _LOG("dns id:%d resp:%d name:%s ip:%s", get_domain_req_id(req), get_domain_req_resp(req), get_domain_req_name(req),
+         get_domain_req_ip(req));
     int src_fd = get_domain_req_id(req);
     if (src_fd > 0 && get_domain_req_resp(req) == 0) {
         int src_status = pconn_get_status(src_fd);
@@ -440,9 +451,7 @@ static void ss5_req(int fd, const char* buf, int len) {
     pconn_set_ex(fd, SS5_PHASE_DATA);
 }
 
-static int on_backend_recv(int fd, const char* buf, int len) {
-    return send_to_cp(fd, buf, len);
-}
+static int on_backend_recv(int fd, const char* buf, int len) { return send_to_cp(fd, buf, len); }
 
 static int on_front_recv(int fd, const char* buf, int len) {
     int phase = pconn_get_ex(fd);
@@ -512,7 +521,7 @@ static int on_connected(ssnet_t* net, int fd) {
         close_conn(fd);
         return _OK;
     }
-    if (!pconn_is_same_fr(fd)) {
+    if (!pconn_is_couple(fd)) {
         close_conn(fd);
         return _OK;
     }
@@ -569,7 +578,8 @@ int main(int argc, char const* argv[]) {
     }
 
     sslog_init(g_socks.log_file, g_socks.log_level);
-    printf("listen ip: %s \nlisten port: %u \nlog level: %d \nlog file: %s\n", g_socks.listen_ip, g_socks.listen_port, g_socks.log_level, g_socks.log_file);
+    printf("listen ip: %s \nlisten port: %u \nlog level: %d \nlog file: %s\n", g_socks.listen_ip, g_socks.listen_port,
+           g_socks.log_level, g_socks.log_file);
     if (g_socks.log_file) free(g_socks.log_file);
 
     g_socks.loop = ssev_init();

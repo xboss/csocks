@@ -39,8 +39,9 @@ typedef struct {
     stream_buf_t* fr_rcv_buf;
     stream_buf_t* bk_snd_buf;
     stream_buf_t* bk_rcv_buf;
-/*     pconn_t* fr;
-    pconn_t* bk; */
+    /*     pconn_t* fr;
+        pconn_t* bk; */
+    int ref_cnt;
 } pconn_info_t;
 
 struct pconn_s {
@@ -52,7 +53,7 @@ struct pconn_s {
     int ex;
     int can_write;
     uint64_t ctime;
-    uint64_t cp_ctime;
+    /* uint64_t cp_ctime; */
     pconn_info_t* info;
     UT_hash_handle hh;
 };
@@ -81,7 +82,7 @@ int pconn_init(int id, pconn_type_t type, int cp_id) {
     pconn_t* c = get_conn(id);
     assert(c == NULL);
 
-    uint64_t cp_time = 0L;
+    /* uint64_t cp_time = 0L; */
     pconn_info_t* info = NULL;
     if (type == PCONN_TYPE_BK) {
         pconn_t* cp = get_conn(cp_id);
@@ -89,19 +90,19 @@ int pconn_init(int id, pconn_type_t type, int cp_id) {
         assert(cp->info);
         info = cp->info;
         /* info->bk = c; */
-        cp_time = cp->ctime;
+        /* cp_time = cp->ctime; */
     } else {
         _ALLOC(info, pconn_info_t*, sizeof(pconn_info_t));
         memset(info, 0, sizeof(pconn_info_t));
         /* info->fr = c; */
+        info->fr_st = PCONN_ST_NONE;
+        info->bk_st = PCONN_ST_NONE;
+        /* info->st = PCONN_ST_NONE; */
+        info->fr_rcv_buf = sb_init(NULL, 0);
+        info->fr_snd_buf = sb_init(NULL, 0);
+        info->bk_rcv_buf = sb_init(NULL, 0);
+        info->bk_snd_buf = sb_init(NULL, 0);
     }
-    info->fr_st = PCONN_ST_NONE;
-    info->bk_st = PCONN_ST_NONE;
-    /* info->st = PCONN_ST_NONE; */
-    info->fr_rcv_buf = sb_init(NULL, 0);
-    info->fr_snd_buf = sb_init(NULL, 0);
-    info->bk_rcv_buf = sb_init(NULL, 0);
-    info->bk_snd_buf = sb_init(NULL, 0);
 
     _ALLOC(c, pconn_t*, sizeof(pconn_t));
     memset(c, 0, sizeof(pconn_t));
@@ -109,8 +110,9 @@ int pconn_init(int id, pconn_type_t type, int cp_id) {
     c->type = type;
     c->ctime = mstime();
     c->info = info;
+    info->ref_cnt++;
     c->can_write = 0;
-    c->cp_ctime = cp_time;
+    /* c->cp_ctime = cp_time; */
     HASH_ADD_INT(g_conn_tb, id, c);
     _LOG("pconn_init ok. id:%d", id);
     return _OK;
@@ -139,13 +141,14 @@ void pconn_free(int id) {
             sb_free(c->info->bk_rcv_buf);
             c->info->bk_rcv_buf = NULL;
         }
-/*         if (c->type == PCONN_TYPE_FR) {
-            c->info->fr = NULL;
-        }
-        if (c->type == PCONN_TYPE_BK) {
-            c->info->bk = NULL;
-        } */
-        if (c->info->fr_st == PCONN_ST_OFF && c->info->bk_st == PCONN_ST_OFF) {
+        /*         if (c->type == PCONN_TYPE_FR) {
+                    c->info->fr = NULL;
+                }
+                if (c->type == PCONN_TYPE_BK) {
+                    c->info->bk = NULL;
+                } */
+        c->info->ref_cnt--;
+        if (c->info->ref_cnt <= 0) {
             free(c->info);
             c->info = NULL;
         }
@@ -278,12 +281,12 @@ int pconn_is_exist(int id) {
     return 1;
 }
 
-int pconn_is_same_fr(int bk_id) {
-    pconn_t* c = get_conn(bk_id);
+int pconn_is_couple(int id) {
+    pconn_t* c = get_conn(id);
     if (!c) return 0;
     pconn_t* cp = get_conn(c->cp_id);
     if (!cp) return 0;
-    if (c->cp_ctime != cp->ctime) {
+    if (c->info != cp->info) {
         return 0;
     }
     return 1;

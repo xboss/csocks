@@ -24,7 +24,7 @@
     }
 #endif
 
-#define DEF_READ_BUF_SIZE (1500)
+#define DEF_READ_BUF_SIZE (1024)
 
 struct ssnet_tcp_server_s {
     int listen_fd;
