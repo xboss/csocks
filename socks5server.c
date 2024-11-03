@@ -529,16 +529,6 @@ static int on_accept(ssnet_t* net, int fd) {
 
 static int on_connected(ssnet_t* net, int fd) {
     _LOG("on_connected fd:%d", fd);
-    if (!pconn_is_exist(fd)) {
-        _LOG_E("on_connected fd:%d does not exist, close", fd);
-        ssnet_tcp_close(net, fd);
-        return _ERR;
-    }
-    if (pconn_get_status(fd) == PCONN_ST_OFF) {
-        _LOG("on_connected fd:%d is off, close", fd);
-        close_conn(fd);
-        return _ERR;
-    }
     int cp_fd = pconn_get_couple_id(fd);
     if (cp_fd <= 0) {
         _LOG("on_connected fd:%d couple does not exist", fd);
@@ -554,6 +544,16 @@ static int on_connected(ssnet_t* net, int fd) {
 
 static int on_writable(ssnet_t* net, int fd) {
     _LOG("on_writable fd:%d", fd);
+    if (!pconn_is_exist(fd)) {
+        _LOG_E("on_writable fd:%d does not exist, close", fd);
+        ssnet_tcp_close(net, fd);
+        return _ERR;
+    }
+    if (pconn_get_status(fd) == PCONN_ST_OFF) {
+        _LOG_E("on_writable fd:%d is off, close", fd);
+        close_conn(fd);
+        return _ERR;
+    }
     assert(pconn_get_type(fd) != PCONN_TYPE_NONE);
     int rt = _OK;
     if (pconn_get_status(fd) == PCONN_ST_READY && pconn_get_type(fd) == PCONN_TYPE_CLI) {
