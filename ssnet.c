@@ -203,7 +203,9 @@ int ssnet_tcp_send(ssnet_t *net, int fd, const char *buf, int len) {
         _LOG("net_tcp_send again fd:%d len:%d", fd, len);
     } else if ((bytes == -1) && !((errno == EINTR) || (errno == EAGAIN) || (errno == EWOULDBLOCK))) {
         /* error */
-        perror("net_tcp_send"); /* TODO: debug */
+        /* TODO: debug */
+        _LOG_E("net_tcp_send error fd:%d errno:%d %s", fd, errno, strerror(errno));
+        /* perror(msg);  */
         rt = -2;
     } else {
         /* ok */
