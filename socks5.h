@@ -6,6 +6,7 @@
 
 int ss5_auth(ssconn_t* conn, const char* buf, int len);
 int ss5_auth_np(ssconn_t* conn, const char* buf, int len);
+int ss5_req(ssconn_t* conn, const char* buf, int len);
 int ss5_data(ssconn_t* conn, const char* buf, int len, int tag_len);
 
 #endif /* _SOCKS5_H */

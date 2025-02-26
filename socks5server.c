@@ -1,12 +1,13 @@
 #include "socks5server.h"
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <uv.h>
 
 #include "cipher.h"
-#include "ssconn.h"
 #include "socks5.h"
+#include "ssconn.h"
 
 static char packet_tag[] = {'S', 'S', 'P'};
 
@@ -24,6 +25,7 @@ static void alloc_buffer(uv_handle_t* handle, size_t suggested_size, uv_buf_t* b
 
 static void on_front_close(uv_handle_t* handle) {
     free(handle);
+    /* TODO: */
 }
 
 static void echo_write(uv_write_t* req, int status) {
@@ -74,11 +76,13 @@ static int on_front_read_ok(ssconn_t* conn, const char* buf, int len) {
             return _ERR;
         }
         if (ciphertext_len > conn->recv_buf->len - PACKET_HEAD_LEN) {
-            _LOG("on_front_read_ok ciphertext_len:%d > recv_buf->len:%d rfd:%d sfd:%d", ciphertext_len, conn->recv_buf->len, conn->fd, conn->cp_fd);
+            _LOG("on_front_read_ok ciphertext_len:%d > recv_buf->len:%d rfd:%d sfd:%d", ciphertext_len,
+                 conn->recv_buf->len, conn->fd, conn->cp_fd);
             return _OK;
         }
         // decrypt
-        plain_text = aes_decrypt(socks->conf->key, conn->recv_buf->buf + PACKET_HEAD_LEN, ciphertext_len, &plain_text_len);
+        plain_text =
+            aes_decrypt(socks->conf->key, conn->recv_buf->buf + PACKET_HEAD_LEN, ciphertext_len, &plain_text_len);
         if (plain_text == NULL) {
             _LOG_E("on_front_read_ok aes_decrypt error");
             ssconn_close(conn->fd);
@@ -110,8 +114,12 @@ static int on_front_read_ok(ssconn_t* conn, const char* buf, int len) {
                 return _ERR;
             }
         } else if (conn->phase == SSCONN_PHASE_REQ) {
-            ss5_req();
-            /* TODO: */
+            rt = ss5_req(conn, plain_text, plain_text_len - sizeof(packet_tag));
+            if (rt != _OK) {
+                _LOG_E("on_front_read_ok ss5_req error");
+                free(plain_text);
+                return _ERR;
+            }
         } else if (conn->phase == SSCONN_PHASE_DATA) {
             assert(conn->cp_fd > 0);
             assert(conn->status == SSCONN_ST_ON);
@@ -214,7 +222,8 @@ static void on_new_connection(uv_stream_t* server, int status) {
     // uv_tcp_connect(&connect_req, &back, (const struct sockaddr*)&dest_addr, on_connect);
 
     uv_os_fd_t front_fd, server_fd;
-    if (uv_fileno((const uv_handle_t*)front, &front_fd) != 0 || uv_fileno((const uv_handle_t*)server, &server_fd) != 0) {
+    if (uv_fileno((const uv_handle_t*)front, &front_fd) != 0 ||
+        uv_fileno((const uv_handle_t*)server, &server_fd) != 0) {
         _LOG_E("Failed to get front fd");
         uv_close((uv_handle_t*)front, on_front_close);
         return;

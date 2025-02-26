@@ -2,7 +2,6 @@
 #define _SSCONN_H
 
 #include "ss5.h"
-
 #include "uthash.h"
 
 #define PACKET_HEAD_LEN 4
@@ -20,7 +19,13 @@ void ssbuffer_free(ssbuffer_t* ssb);
 #define PACKET_HEAD_LEN 4
 typedef enum { SSCONN_TYPE_NONE = 0, SSCONN_TYPE_SERV, SSCONN_TYPE_CLI } ssconn_type_t;
 typedef enum { SSCONN_ST_OFF = 0, SSCONN_ST_WAIT, SSCONN_ST_ON } ssconn_st_t;
-typedef enum { SSCONN_PHASE_NONE = 0, SSCONN_PHASE_AUTH, SSCONN_PHASE_REQ, SSCONN_PHASE_AUTH_NP, SSCONN_PHASE_DATA } ssconn_phase_t;
+typedef enum {
+    SSCONN_PHASE_NONE = 0,
+    SSCONN_PHASE_AUTH,
+    SSCONN_PHASE_REQ,
+    SSCONN_PHASE_AUTH_NP,
+    SSCONN_PHASE_DATA
+} ssconn_phase_t;
 typedef struct {
     int fd;
     int cp_fd;
@@ -31,6 +36,7 @@ typedef struct {
     ssbuffer_t* recv_buf;
     ssbuffer_t* send_buf;
     void* user_data;
+    unsigned short ex_data;
     UT_hash_handle hh;
 } ssconn_t;
 

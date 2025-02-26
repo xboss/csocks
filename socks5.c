@@ -1,6 +1,5 @@
 #include "socks5.h"
 
-
 #define SS5_VER 0x05U
 #define SS5_AUTH_NP_VER 0x01U
 #define SS5_CMD_CONNECT 0x01U
@@ -90,7 +89,7 @@ int ss5_auth(ssconn_t* conn, const char* buf, int len) {
     for (i = 0; i < nmethods; i++) {
         if (buf[2 + i] == 0x00) {
             /* NO AUTHENTICATION REQUIRED */
-            phase =  SSCONN_PHASE_REQ;
+            phase = SSCONN_PHASE_REQ;
             break;
         } else if (buf[2 + i] == 0x02) {
             /* USERNAME/PASSWORD */
@@ -102,7 +101,7 @@ int ss5_auth(ssconn_t* conn, const char* buf, int len) {
             ack[1] = 0xff;
         }
     }
-    
+
     rt = ssbuffer_grow(conn->send_buf, sizeof(ack));
     if (rt != _OK) {
         _LOG_E("ss5_auth ssbuffer_grow send_buf error");
@@ -148,13 +147,188 @@ int ss5_data(ssconn_t* conn, const char* buf, int len, int tag_len) {
     memcpy(cp_conn->send_buf->buf + cp_conn->send_buf->len, buf, len - tag_len);
     cp_conn->send_buf->len += len - tag_len;
 
-    memmove(conn->recv_buf->buf, conn->recv_buf->buf + PACKET_HEAD_LEN + len, conn->recv_buf->len - PACKET_HEAD_LEN - len);
+    memmove(conn->recv_buf->buf, conn->recv_buf->buf + PACKET_HEAD_LEN + len,
+            conn->recv_buf->len - PACKET_HEAD_LEN - len);
     conn->recv_buf->len -= PACKET_HEAD_LEN + len;
     assert(conn->recv_buf->len >= 0);
 
     rt = ssconn_flush_send_buf(cp_conn);
     if (rt != _OK) {
         _LOG_E("ss5_data ssconn_flush_send_buf error");
+        return _ERR;
+    }
+    return _OK;
+}
+
+static void on_back_connect(uv_connect_t* connect_req, int status) {
+    ssconn_t* conn = (ssconn_t*)connect_req->data;
+    assert(conn);
+    assert(conn->fd > 0);
+    assert(conn->status == SSCONN_ST_WAIT);
+    assert(conn->phase == SSCONN_PHASE_REQ);
+    assert(conn->type == SSCONN_TYPE_SERV);
+    assert(conn->tcp);
+    assert(conn->tcp->loop);
+
+    if (status == -1) {
+        _LOG_E("back connect error: %s", uv_strerror(status));
+        ssconn_close(conn->fd);
+        free(connect_req);
+        free(connect_req->handle);
+        return;
+    }
+
+    uv_os_fd_t back_fd;
+    if (uv_fileno((const uv_handle_t*)conn->tcp, &back_fd) != 0) {
+        _LOG_E("Failed to get back fd");
+        ssconn_close(conn->fd);
+        free(connect_req);
+        free(connect_req->handle);
+        return;
+    }
+    _LOG("back connect ok. front_fd: %d back_fd: %d", conn->fd, (int)back_fd);
+
+    ssconn_t* cp_conn = ssconn_init(connect_req->handle, SSCONN_TYPE_CLI, SSCONN_ST_WAIT);
+    if (!cp_conn) {
+        _LOG_E("Failed to initialize ssconn. back fd: %d", (int)back_fd);
+        ssconn_close(conn->fd);
+        free(connect_req);
+        free(connect_req->handle);
+        return;
+    }
+    cp_conn->tcp = connect_req->handle;
+    conn->cp_fd = cp_conn->fd;
+    cp_conn->cp_fd = conn->fd;
+    conn->status = SSCONN_ST_ON;
+    cp_conn->status = SSCONN_ST_ON;
+    int rt = ssconn_flush_send_buf(conn);
+    if (rt != _OK) {
+        _LOG_E("on_back_connect ssconn_flush_send_buf error front_fd: %d", conn->fd);
+        free(connect_req);
+        free(connect_req->handle);
+        ssconn_close(conn->fd);
+        return;
+    }
+    free(connect_req);
+    conn->phase = SSCONN_PHASE_DATA;
+}
+
+static uv_tcp_t* tcp_connect(uv_loop_t* loop, const char* ip, unsigned short port, uv_connect_cb cb, ssconn_t* conn) {
+    assert(loop);
+    assert(ip);
+    assert(port > 0);
+    assert(cb);
+
+    uv_tcp_t* tcp = (uv_tcp_t*)calloc(1, sizeof(uv_tcp_t));
+    if (!tcp) {
+        _LOG_E("Failed to allocate memory for tcp_connect");
+        return NULL;
+    }
+    int rt = uv_tcp_init(loop, tcp);
+    if (rt != 0) {
+        _LOG_E("Failed to initialize tcp");
+        free(tcp);
+        return NULL;
+    }
+    struct sockaddr_in dest_addr;
+    rt = uv_ip4_addr(ip, port, &dest_addr);
+    if (rt != 0) {
+        _LOG_E("Invalid IP address or port");
+        free(tcp);
+        return NULL;
+    }
+    uv_connect_t* connect_req = (uv_connect_t*)calloc(1, sizeof(uv_connect_t));
+    connect_req->data = conn;
+
+    rt = uv_tcp_connect(connect_req, tcp, (const struct sockaddr*)&dest_addr, cb);
+    if (rt != 0) {
+        _LOG_E("Failed to connect to back");
+        free(tcp);
+        free(connect_req);
+        return NULL;
+    }
+    return tcp;
+}
+
+void on_resolved(uv_getaddrinfo_t* req, int status, struct addrinfo* res) {
+    _LOG("on_resolved status %d", status);
+    if (status < 0) {
+        _LOG_E("Failed to resolve domain %s", uv_strerror(status));
+        free(req);
+        return;
+    }
+
+    ssconn_t* conn = (ssconn_t*)req->data;
+    assert(conn);
+    assert(conn->fd > 0);
+    assert(conn->status == SSCONN_ST_WAIT);
+    assert(conn->phase == SSCONN_PHASE_REQ);
+    assert(conn->type == SSCONN_TYPE_SERV);
+    assert(conn->tcp);
+    assert(conn->tcp->loop);
+    assert(conn->ex_data > 0);
+
+    if (!res && !res->ai_addr) {
+        _LOG_E("Failed to resolve domain");
+        ssconn_close(conn->fd);
+        free(req);
+        return;
+    }
+
+    struct sockaddr* addr = res->ai_addr;
+
+    char ip_str[INET_ADDRSTRLEN] = {0};
+    if (addr->sa_family == AF_INET) {
+        struct sockaddr_in* addr_in = (struct sockaddr_in*)addr;
+        uv_ip4_name(addr_in, ip_str, sizeof(ip_str));
+        _LOG("Resolved IPv4 address: %s\n", ip_str);
+        unsigned short port = conn->ex_data;
+        uv_tcp_t* back = tcp_connect(conn->tcp->loop, ip_str, port, on_back_connect, conn);
+        if (!back) {
+            _LOG_E("Failed to connect to back");
+            ssconn_close(conn->fd);
+            return;
+        }
+    } else if (addr->sa_family == AF_INET6) {
+        // struct sockaddr_in6* addr_in6 = (struct sockaddr_in6*)addr;
+        // char ip_str[INET6_ADDRSTRLEN];
+        // uv_ip6_name(addr_in6, ip_str, sizeof(ip_str));
+        _LOG_W("unsupported IPv6 dns");
+    } else {
+        _LOG_E("Unknown address family\n");
+    }
+    free(req);
+    _LOG("on_resolved end");
+}
+
+int resolve_domain(ssconn_t* conn, char* domain, int family) {
+    assert(conn);
+    assert(conn->fd > 0);
+    assert(conn->status == SSCONN_ST_WAIT);
+    assert(conn->phase == SSCONN_PHASE_REQ);
+    assert(conn->type == SSCONN_TYPE_SERV);
+    assert(conn->tcp);
+    assert(conn->tcp->loop);
+    assert(conn->ex_data > 0);
+    assert(domain);
+    assert(family == AF_INET || family == AF_INET6);
+    _LOG("resolve_domain %d", conn->fd);
+    struct addrinfo hints;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = family;
+    hints.ai_socktype = SOCK_STREAM;
+    uv_getaddrinfo_t* getaddrinfo_req = (uv_getaddrinfo_t*)calloc(1, sizeof(uv_getaddrinfo_t));
+    if (!getaddrinfo_req) {
+        _LOG_E("Failed to allocate memory for getaddrinfo_req");
+        ssconn_close(conn->fd);
+        return _ERR;
+    }
+    getaddrinfo_req->data = conn;
+    int rt = uv_getaddrinfo(conn->tcp->loop, (uv_getaddrinfo_t*)getaddrinfo_req, on_resolved, domain, NULL, &hints);
+    if (rt != 0) {
+        _LOG_E("Failed to resolve domain %s", uv_strerror(rt));
+        free(getaddrinfo_req);
+        ssconn_close(conn->fd);
         return _ERR;
     }
     return _OK;
@@ -176,13 +350,22 @@ int ss5_req(ssconn_t* conn, const char* buf, int len) {
         ssconn_close(conn->fd);
         return _ERR;
     }
-    char ack[SS5_REQ_ACK_MAX_SZ];
-    assert(SS5_REQ_ACK_MAX_SZ >= len);
-    memcpy(ack, buf, len);
-    char rep = 0x00;
+
+    int rt = ssbuffer_grow(conn->send_buf, len);
+    if (rt != _OK) {
+        _LOG_E("ss5_req ssbuffer_grow ack error");
+        ssconn_close(conn->fd);
+        return _ERR;
+    }
+    memcpy(conn->send_buf, buf, len);
+    conn->send_buf->len += len;
+
+    char domain[256] = {0}; /* TODO: */
+    // char ack[SS5_REQ_ACK_MAX_SZ];
+    // assert(SS5_REQ_ACK_MAX_SZ >= len);
+    // memcpy(ack, buf, len);
     unsigned short port = 0;
-    char ip[INET_ADDRSTRLEN];
-    memset(ip, 0, INET_ADDRSTRLEN);
+    char ip[INET_ADDRSTRLEN] = {0};
     unsigned char atyp = buf[3];
     if (atyp == SS5_ATYP_IPV4) {
         struct in_addr addr;
@@ -193,42 +376,32 @@ int ss5_req(ssconn_t* conn, const char* buf, int len) {
         _LOG("socks5 ip:%s:%u", ip, port);
     } else if (atyp == SS5_ATYP_DOMAIN) {
         int d_len = (int)(buf[4] & 0xff);
-        assert(d_len <= SS5_DOMAIN_NAME_MAX_SZ);
+        assert(d_len > 0 && d_len < 256);
+        memcpy(domain, buf + 5, d_len);
+        _LOG("socks5 domain:%s", domain);
         port = ntohs(*(uint16_t*)(buf + 4 + d_len + 1));
-        uint64_t ctime = pconn_get_ctime(fd);
-        assert(ctime > 0);
-        domain_req_t* req = init_domain_req(fd, buf + 5, d_len, domain_cb, port, ctime, pipe);
-        if (!req) {
-            close_conn(fd);
-            return;
-        }
-        int rt = resolve_domain(req);
+        conn->ex_data = port;
+        rt = resolve_domain(conn, domain, AF_INET);
         if (rt != 0) {
-            close_conn(fd);
-            return;
+            ssconn_close(conn->fd);
+            return _ERR;
         }
-        return;
+        return _OK;
     } else if (atyp == SS5_ATYP_IPV6) {
         _LOG("socks5 ipv6 type");
         /* TODO: support ipv6 */
-        return;
+        return _ERR;
     } else {
         _LOG("socks5 request error atyp");
-        return;
+        ssconn_close(conn->fd);
+        return _ERR;
     }
 
-    int cp_fd = connect_to(ip, port, fd);
-    if (cp_fd <= 0) {
-        close_conn(fd);
-        return;
+    uv_tcp_t* back = tcp_connect(conn->tcp->loop, ip, port, on_back_connect, conn);
+    if (!back) {
+        _LOG_E("Failed to connect to back");
+        ssconn_close(conn->fd);
+        return _ERR;
     }
-    ack[1] = rep;
-    int rt = send_to(fd, ack, len);
-    if (rt == -1) {
-        close_conn(fd);
-        return;
-    }
-    _LOG("socks5 send_to ok fd:%d", fd);
-    conn->phase = SSCONN_PHASE_DATA;
     return _OK;
 }
