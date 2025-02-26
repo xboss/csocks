@@ -147,8 +147,7 @@ int ss5_data(ssconn_t* conn, const char* buf, int len, int tag_len) {
     memcpy(cp_conn->send_buf->buf + cp_conn->send_buf->len, buf, len - tag_len);
     cp_conn->send_buf->len += len - tag_len;
 
-    memmove(conn->recv_buf->buf, conn->recv_buf->buf + PACKET_HEAD_LEN + len,
-            conn->recv_buf->len - PACKET_HEAD_LEN - len);
+    memmove(conn->recv_buf->buf, conn->recv_buf->buf + PACKET_HEAD_LEN + len, conn->recv_buf->len - PACKET_HEAD_LEN - len);
     conn->recv_buf->len -= PACKET_HEAD_LEN + len;
     assert(conn->recv_buf->len >= 0);
 
@@ -401,6 +400,173 @@ int ss5_req(ssconn_t* conn, const char* buf, int len) {
     if (!back) {
         _LOG_E("Failed to connect to back");
         ssconn_close(conn->fd);
+        return _ERR;
+    }
+    return _OK;
+}
+
+///////////////////////////////////////
+
+static char packet_tag[] = {'S', 'S', 'P'};
+
+///////////////////////////////////////
+// tcp server callback start
+///////////////////////////////////////
+
+void on_close(uv_handle_t* tcp) {
+    /* TODO: */
+    return;
+}
+
+int on_accept(uv_stream_t* tcp) {
+    ssconn_t* conn = ssconn_init((uv_stream_t*)tcp, SSCONN_TYPE_SERV, SSCONN_ST_WAIT);
+    if (!conn) {
+        _LOG_E("Failed to initialize ssconn.");
+        uv_close((uv_handle_t*)tcp, NULL);  // 在没有创建conn之前不用回调
+        return _ERR;
+    }
+    return _OK;
+}
+
+#define RET_PHASE_ERROR(_msg) \
+    do {                      \
+        if (rt != _OK) {      \
+            _LOG_E(_msg);     \
+            free(plain_text); \
+            return _ERR;      \
+        }                     \
+    } while (0)
+
+int on_front_read(uv_stream_t* tcp, const char* buf, int len) {
+    uv_os_fd_t fd;
+    if (uv_fileno((const uv_handle_t*)tcp, &fd) != 0) {
+        _LOG_E("on_front_read get fd error");
+        uv_close((uv_handle_t*)tcp, on_close);
+        return _ERR;
+    }
+
+    ssconn_t* conn = ssconn_get(fd);
+    if (!conn) {
+        _LOG_E("on_front_read ssconn_get conn error. front fd: %d", (int)fd);
+        uv_close((uv_handle_t*)tcp, on_close);
+        return _ERR;
+    }
+
+    // check conn
+    assert(conn);
+    if (conn->status == SSCONN_ST_OFF) {
+        _LOG_E("on_front_read conn off");
+        ssconn_close(conn->fd);
+        return _ERR;
+    }
+
+    assert(conn->recv_buf);
+    assert(conn->send_buf);
+
+    socks5_t* socks5 = (socks5_t*)conn->tcp->loop->data;
+    assert(socks5);
+
+    int rt = ssbuffer_grow(conn->recv_buf, len);
+    if (rt != _OK) {
+        _LOG_E("on_front_read ssbuffer_grow recv_buf error");
+        ssconn_close(conn->fd);
+        return _ERR;
+    }
+    memcpy(conn->recv_buf->buf + conn->recv_buf->len, buf, len);
+    conn->recv_buf->len += len;
+    assert(conn->recv_buf->len > 0);
+
+    int ciphertext_len = 0;
+    int plain_text_len = 0;
+    char* plain_text = NULL;
+    while (conn->recv_buf->len > PACKET_HEAD_LEN) {
+        // unpack
+        ciphertext_len = ntohl(*(int*)conn->recv_buf->buf);
+        if (ciphertext_len <= 0 || ciphertext_len > 65535) { /* TODO: magic number */
+            _LOG_E("on_front_read ciphertext_len:%d error. recv_buf->len:%d", ciphertext_len, conn->recv_buf->len);
+            ssconn_close(conn->fd);
+            return _ERR;
+        }
+        if (ciphertext_len > conn->recv_buf->len - PACKET_HEAD_LEN) {
+            _LOG("on_front_read ciphertext_len:%d > recv_buf->len:%d rfd:%d sfd:%d", ciphertext_len, conn->recv_buf->len, conn->fd, conn->cp_fd);
+            return _OK;
+        }
+        // decrypt
+        plain_text = aes_decrypt(socks5->conf->key, conn->recv_buf->buf + PACKET_HEAD_LEN, ciphertext_len, &plain_text_len);
+        if (plain_text == NULL) {
+            _LOG_E("on_front_read aes_decrypt error");
+            ssconn_close(conn->fd);
+            return _ERR;
+        }
+
+        assert(plain_text_len > sizeof(packet_tag));
+
+        // check packet tag
+        if (memcmp(plain_text + plain_text_len - sizeof(packet_tag), packet_tag, sizeof(packet_tag)) != 0) {
+            _LOG_E("on_front_read packet_tag error");
+            ssconn_close(conn->fd);
+            free(plain_text);
+            return _ERR;
+        }
+
+        if (conn->phase == SSCONN_PHASE_AUTH) {
+            rt = ss5_auth(conn, plain_text, plain_text_len - sizeof(packet_tag));
+            RET_PHASE_ERROR("on_front_read ss5_auth error");
+        } else if (conn->phase == SSCONN_PHASE_AUTH_NP) {
+            rt = ss5_auth_np(conn, plain_text, plain_text_len - sizeof(packet_tag));
+            RET_PHASE_ERROR("on_front_read ss5_auth_np error");
+        } else if (conn->phase == SSCONN_PHASE_REQ) {
+            rt = ss5_req(conn, plain_text, plain_text_len - sizeof(packet_tag));
+            RET_PHASE_ERROR("on_front_read ss5_req error");
+        } else if (conn->phase == SSCONN_PHASE_DATA) {
+            assert(conn->cp_fd > 0);
+            assert(conn->status == SSCONN_ST_ON);
+            rt = ss5_data(conn, plain_text, plain_text_len, sizeof(packet_tag));
+            RET_PHASE_ERROR("on_front_read ss5_data error");
+        }
+        free(plain_text);
+    }
+    return _OK;
+}
+
+///////////////////////////////////////
+// tcp server callback end
+///////////////////////////////////////
+
+socks5_t* socks5_init(uv_loop_t* loop, ssconfig_t* conf) {
+    if (!loop || !conf) return NULL;
+    socks5_t* socks5 = (socks5_t*)calloc(1, sizeof(socks5_t));
+    if (!socks5) return NULL;
+    socks5->loop = loop;
+    socks5->conf = conf;
+    loop->data = socks5;
+    socks5->tcp_server = tcp_server_init(loop, conf->listen_ip, conf->listen_port, conf->read_buf_size);
+    if (!socks5->tcp_server) {
+        _LOG_E("Failed to initialize tcp server");
+        free(socks5);
+        return NULL;
+    }
+    socks5->tcp_server->on_accept = on_accept;
+    socks5->tcp_server->on_read = on_front_read;
+    socks5->tcp_server->on_close = on_close;
+    return socks5;
+}
+
+void socks5_free(socks5_t* socks5) {
+    if (!socks5) return;
+    if (socks5->tcp_server) {
+        tcp_server_free(socks5->tcp_server);
+        socks5->tcp_server = NULL;
+    }
+    free(socks5);
+    return;
+}
+
+int socks5_start(socks5_t* socks5) {
+    if (!socks5) return _ERR;
+    int rt = tcp_server_start(socks5->tcp_server);
+    if (rt != _OK) {
+        _LOG_E("Failed to start tcp server");
         return _ERR;
     }
     return _OK;

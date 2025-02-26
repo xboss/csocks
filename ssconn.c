@@ -76,9 +76,14 @@ int ssconn_close(int fd){
     return _OK;
 }
 
-int ssconn_flush_send_buf(ssconn_t* cp_conn){
+int ssconn_send(int fd, const char* buf, int len){
     /* TODO: */
     return _OK;
 }
+
+// int ssconn_flush_send_buf(ssconn_t* cp_conn){
+//     /* TODO: */
+//     return _OK;
+// }
 
 // ssconn end

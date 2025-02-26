@@ -17,6 +17,7 @@ int ssbuffer_grow(ssbuffer_t* ssb, int len);
 void ssbuffer_free(ssbuffer_t* ssb);
 
 #define PACKET_HEAD_LEN 4
+// #define MAX_PACKET_LEN 2048
 typedef enum { SSCONN_TYPE_NONE = 0, SSCONN_TYPE_SERV, SSCONN_TYPE_CLI } ssconn_type_t;
 typedef enum { SSCONN_ST_OFF = 0, SSCONN_ST_WAIT, SSCONN_ST_ON } ssconn_st_t;
 typedef enum {
@@ -45,6 +46,7 @@ void ssconn_free(ssconn_t* conn);
 void ssconn_free_all();
 ssconn_t* ssconn_get(int fd);
 int ssconn_close(int fd);
-int ssconn_flush_send_buf(ssconn_t* cp_conn);
+int ssconn_send(int fd, const char* buf, int len);
+// int ssconn_flush_send_buf(ssconn_t* cp_conn);
 
 #endif /* _SSCONN_H */
